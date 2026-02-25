@@ -1,0 +1,1556 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ほのぼの農園 - Farming Simulation</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: #1a1a2e;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  height: 100vh;
+  overflow: hidden;
+  font-family: monospace;
+}
+canvas {
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+  border: 3px solid #4a3728;
+  cursor: none;
+}
+#loading {
+  color: #fff;
+  font-size: 24px;
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+}
+</style>
+</head>
+<body>
+<div id="loading">Loading...</div>
+<canvas id="gameCanvas"></canvas>
+<script>
+'use strict';
+
+// ============================================================
+// CONSTANTS
+// ============================================================
+const TILE = 32;
+const MAP_W = 40;
+const MAP_H = 30;
+const VIEW_W = 20;
+const VIEW_H = 15;
+const CANVAS_W = VIEW_W * TILE;
+const CANVAS_H = VIEW_H * TILE;
+const PLAYER_SPEED = 2.5;
+const MAX_ENERGY = 100;
+const DAY_LENGTH = 120; // seconds per game day
+
+const SEASONS = ['春 (Spring)', '夏 (Summer)', '秋 (Autumn)', '冬 (Winter)'];
+const SEASON_COLORS = ['#7ec850', '#45a049', '#d4a030', '#e8e8e8'];
+const SEASON_GRASS = ['#7ec850', '#5aad3c', '#c8a030', '#dde8dd'];
+const SEASON_DARK_GRASS = ['#5aad3c', '#3d8f2f', '#a08028', '#c8d4c8'];
+const SEASON_TREE_COLORS = ['#3d8f2f', '#2d7f1f', '#d48020', '#88aa88'];
+
+// Tile types
+const T = {
+  GRASS: 0, DIRT: 1, TILLED: 2, WATER: 3, PATH: 4,
+  HOUSE_WALL: 5, HOUSE_DOOR: 6, SHOP_WALL: 7, SHOP_DOOR: 8,
+  FENCE: 9, TREE: 10, FLOWER: 11, ROCK: 12, WATERED: 13,
+  HOUSE_ROOF: 14, SHOP_ROOF: 15, BED: 16, SHIPPING_BIN: 17
+};
+
+// Crop definitions
+const CROPS = {
+  turnip:  { name: 'カブ', season: 0, days: 4, buyPrice: 30, sellPrice: 70, color: '#f0f0f0', leafColor: '#5aad3c' },
+  potato:  { name: 'ジャガイモ', season: 0, days: 6, buyPrice: 50, sellPrice: 100, color: '#c8a060', leafColor: '#5aad3c' },
+  tomato:  { name: 'トマト', season: 1, days: 7, buyPrice: 40, sellPrice: 90, color: '#e03030', leafColor: '#3d8f2f' },
+  corn:    { name: 'トウモロコシ', season: 1, days: 9, buyPrice: 60, sellPrice: 130, color: '#f0d030', leafColor: '#3d8f2f' },
+  pumpkin: { name: 'カボチャ', season: 2, days: 8, buyPrice: 70, sellPrice: 160, color: '#e08020', leafColor: '#c8a030' },
+  carrot:  { name: 'ニンジン', season: 2, days: 5, buyPrice: 35, sellPrice: 75, color: '#f08030', leafColor: '#c8a030' },
+};
+
+// Tools
+const TOOLS = [
+  { id: 'hoe', name: 'クワ', icon: '⛏', desc: '土を耕す' },
+  { id: 'water', name: 'ジョウロ', icon: '💧', desc: '水をやる' },
+  { id: 'harvest', name: '収穫', icon: '✋', desc: '作物を収穫する' },
+  { id: 'seed', name: 'タネ', icon: '🌱', desc: 'タネを植える' },
+];
+
+// ============================================================
+// CANVAS SETUP
+// ============================================================
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+canvas.width = CANVAS_W;
+canvas.height = CANVAS_H;
+document.getElementById('loading').style.display = 'none';
+
+// ============================================================
+// AUDIO SYSTEM (Web Audio API)
+// ============================================================
+const AudioCtx = window.AudioContext || window.webkitAudioContext;
+let audioCtx = null;
+function ensureAudio() {
+  if (!audioCtx) audioCtx = new AudioCtx();
+}
+
+function playSound(freq, duration, type = 'square', volume = 0.1) {
+  try {
+    ensureAudio();
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = type;
+    osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+    gain.gain.setValueAtTime(volume, audioCtx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + duration);
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+    osc.start();
+    osc.stop(audioCtx.currentTime + duration);
+  } catch(e) {}
+}
+
+function sfxTill() { playSound(150, 0.15, 'square', 0.08); playSound(100, 0.1, 'square', 0.06); }
+function sfxWater() { playSound(600, 0.2, 'sine', 0.06); playSound(800, 0.15, 'sine', 0.04); }
+function sfxPlant() { playSound(400, 0.1, 'sine', 0.08); playSound(500, 0.08, 'sine', 0.06); }
+function sfxHarvest() {
+  playSound(523, 0.1, 'square', 0.08);
+  setTimeout(() => playSound(659, 0.1, 'square', 0.08), 100);
+  setTimeout(() => playSound(784, 0.15, 'square', 0.08), 200);
+}
+function sfxSelect() { playSound(440, 0.05, 'square', 0.06); }
+function sfxError() { playSound(200, 0.2, 'square', 0.08); }
+function sfxCoin() { playSound(880, 0.08, 'square', 0.06); setTimeout(() => playSound(1100, 0.12, 'square', 0.06), 80); }
+function sfxStep() { playSound(100 + Math.random() * 50, 0.05, 'triangle', 0.03); }
+function sfxMenuOpen() { playSound(500, 0.08, 'square', 0.06); playSound(600, 0.08, 'square', 0.05); }
+function sfxSleep() { playSound(400, 0.3, 'sine', 0.06); setTimeout(() => playSound(300, 0.4, 'sine', 0.05), 200); }
+
+// ============================================================
+// GAME STATE
+// ============================================================
+const game = {
+  state: 'TITLE',       // TITLE, PLAYING, SHOP, SLEEPING, GAMEOVER
+  player: {
+    x: 7 * TILE, y: 8 * TILE,
+    dir: 2,              // 0=up, 1=right, 2=down, 3=left
+    frame: 0, frameTimer: 0, moving: false,
+    energy: MAX_ENERGY,
+  },
+  time: { hour: 6, minute: 0, day: 1, season: 0, year: 1, timer: 0 },
+  money: 500,
+  selectedTool: 0,
+  selectedSeed: 'turnip',
+  inventory: {
+    seeds: { turnip: 5, potato: 0, tomato: 0, corn: 0, pumpkin: 0, carrot: 0 },
+    harvest: { turnip: 0, potato: 0, tomato: 0, corn: 0, pumpkin: 0, carrot: 0 },
+  },
+  crops: {},             // key: "x,y" -> { type, stage, days, watered, maxDays }
+  map: [],
+  camera: { x: 0, y: 0 },
+  particles: [],
+  messages: [],
+  weather: 'sunny',      // sunny, rainy
+  shopScroll: 0,
+  shopTab: 'buy',
+  shopCursor: 0,
+  fadeAlpha: 0,
+  titleFrame: 0,
+};
+
+// ============================================================
+// INPUT
+// ============================================================
+const keys = {};
+const justPressed = {};
+document.addEventListener('keydown', e => {
+  if (!keys[e.code]) justPressed[e.code] = true;
+  keys[e.code] = true;
+  e.preventDefault();
+});
+document.addEventListener('keyup', e => { keys[e.code] = false; });
+document.addEventListener('click', () => ensureAudio());
+
+function isJustPressed(code) {
+  if (justPressed[code]) { justPressed[code] = false; return true; }
+  return false;
+}
+
+// ============================================================
+// MAP GENERATION
+// ============================================================
+function generateMap() {
+  const m = [];
+  for (let y = 0; y < MAP_H; y++) {
+    m[y] = [];
+    for (let x = 0; x < MAP_W; x++) {
+      m[y][x] = T.GRASS;
+    }
+  }
+
+  // Border trees
+  for (let x = 0; x < MAP_W; x++) { m[0][x] = T.TREE; m[1][x] = T.TREE; m[MAP_H-1][x] = T.TREE; m[MAP_H-2][x] = T.TREE; }
+  for (let y = 0; y < MAP_H; y++) { m[y][0] = T.TREE; m[y][1] = T.TREE; m[y][MAP_W-1] = T.TREE; m[y][MAP_W-2] = T.TREE; }
+
+  // House (top-left area)
+  for (let y = 3; y <= 6; y++) for (let x = 3; x <= 7; x++) m[y][x] = T.HOUSE_WALL;
+  for (let x = 3; x <= 7; x++) m[3][x] = T.HOUSE_ROOF;
+  m[6][5] = T.HOUSE_DOOR;
+  m[5][5] = T.BED;
+
+  // Path from house
+  for (let y = 7; y <= 9; y++) m[y][5] = T.PATH;
+  for (let x = 5; x <= 12; x++) m[9][x] = T.PATH;
+
+  // Shop (bottom-left area)
+  for (let y = 11; y <= 14; y++) for (let x = 3; x <= 7; x++) m[y][x] = T.SHOP_WALL;
+  for (let x = 3; x <= 7; x++) m[11][x] = T.SHOP_ROOF;
+  m[14][5] = T.SHOP_DOOR;
+  for (let y = 10; y <= 14; y++) m[y][5] = T.PATH;
+  m[10][5] = T.PATH;
+
+  // Shipping bin
+  m[7][7] = T.SHIPPING_BIN;
+
+  // Farmland area
+  for (let y = 5; y <= 22; y++) {
+    for (let x = 10; x <= 34; x++) {
+      if (m[y][x] === T.GRASS) m[y][x] = T.DIRT;
+    }
+  }
+
+  // Paths through farmland
+  for (let x = 10; x <= 34; x++) m[9][x] = T.PATH;
+  for (let y = 5; y <= 22; y++) m[22][y] = T.PATH;
+
+  // Pond (right side)
+  for (let y = 16; y <= 20; y++) {
+    for (let x = 30; x <= 35; x++) {
+      const dx = x - 32.5, dy = y - 18;
+      if (dx * dx / 9 + dy * dy / 5 < 1.2) m[y][x] = T.WATER;
+    }
+  }
+
+  // Scattered rocks and flowers
+  const decorPositions = [[3,17],[4,20],[8,24],[15,25],[25,25],[30,24],[35,4],[36,8]];
+  decorPositions.forEach(([x,y]) => { if (y < MAP_H-2 && x < MAP_W-2 && m[y][x] === T.GRASS) m[y][x] = T.ROCK; });
+
+  const flowerPositions = [[3,8],[4,9],[8,4],[8,16],[8,20],[36,12],[37,15]];
+  flowerPositions.forEach(([x,y]) => { if (y < MAP_H-2 && x < MAP_W-2 && m[y][x] === T.GRASS) m[y][x] = T.FLOWER; });
+
+  // Fences around farm
+  for (let x = 9; x <= 35; x++) { if (m[4][x] === T.GRASS || m[4][x] === T.DIRT) m[4][x] = T.FENCE; }
+  for (let x = 9; x <= 35; x++) { if (m[23][x] === T.GRASS || m[23][x] === T.DIRT) m[23][x] = T.FENCE; }
+  for (let y = 4; y <= 23; y++) { if (m[y][9] === T.GRASS || m[y][9] === T.DIRT) m[y][9] = T.FENCE; }
+  for (let y = 4; y <= 23; y++) { if (m[y][35] === T.GRASS || m[y][35] === T.DIRT) m[y][35] = T.FENCE; }
+  m[9][9] = T.PATH; // gate
+
+  return m;
+}
+
+// ============================================================
+// PARTICLES
+// ============================================================
+function addParticle(x, y, color, count = 5, spread = 10, life = 30) {
+  for (let i = 0; i < count; i++) {
+    game.particles.push({
+      x, y,
+      vx: (Math.random() - 0.5) * spread * 0.15,
+      vy: -Math.random() * 2 - 1,
+      life, maxLife: life,
+      color, size: 2 + Math.random() * 2,
+    });
+  }
+}
+
+function addMessage(text, duration = 120) {
+  game.messages.push({ text, timer: duration, maxTimer: duration });
+}
+
+// ============================================================
+// DRAWING HELPERS
+// ============================================================
+function drawPixelRect(x, y, w, h, color) {
+  ctx.fillStyle = color;
+  ctx.fillRect(Math.floor(x), Math.floor(y), w, h);
+}
+
+function drawTile(tx, ty, type, screenX, screenY) {
+  const s = game.time.season;
+  const x = screenX, y = screenY;
+
+  switch (type) {
+    case T.GRASS:
+      drawPixelRect(x, y, TILE, TILE, SEASON_GRASS[s]);
+      // Grass details
+      if ((tx + ty) % 3 === 0) {
+        drawPixelRect(x + 8, y + 6, 2, 4, SEASON_DARK_GRASS[s]);
+        drawPixelRect(x + 22, y + 20, 2, 3, SEASON_DARK_GRASS[s]);
+      }
+      if ((tx * 7 + ty * 13) % 5 === 0) {
+        drawPixelRect(x + 16, y + 12, 2, 3, SEASON_DARK_GRASS[s]);
+      }
+      break;
+
+    case T.DIRT:
+      drawPixelRect(x, y, TILE, TILE, '#9e7c4f');
+      drawPixelRect(x + 4, y + 4, 2, 2, '#8a6c3f');
+      drawPixelRect(x + 20, y + 18, 2, 2, '#8a6c3f');
+      if ((tx + ty) % 2 === 0) drawPixelRect(x + 14, y + 10, 2, 2, '#b08c5f');
+      break;
+
+    case T.TILLED:
+      drawPixelRect(x, y, TILE, TILE, '#7a5c3f');
+      for (let i = 0; i < 4; i++) {
+        drawPixelRect(x + 2, y + 4 + i * 7, TILE - 4, 2, '#6a4c2f');
+      }
+      break;
+
+    case T.WATERED:
+      drawPixelRect(x, y, TILE, TILE, '#5a4030');
+      for (let i = 0; i < 4; i++) {
+        drawPixelRect(x + 2, y + 4 + i * 7, TILE - 4, 2, '#4a3525');
+      }
+      break;
+
+    case T.WATER:
+      drawPixelRect(x, y, TILE, TILE, '#3080c0');
+      const waveOff = Math.sin((tx * 2 + ty + game.titleFrame * 0.03)) * 2;
+      drawPixelRect(x + 6 + waveOff, y + 8, 8, 2, '#50a0e0');
+      drawPixelRect(x + 18 - waveOff, y + 20, 6, 2, '#50a0e0');
+      break;
+
+    case T.PATH:
+      drawPixelRect(x, y, TILE, TILE, '#c8a878');
+      drawPixelRect(x + 6, y + 6, 3, 3, '#b89868');
+      drawPixelRect(x + 20, y + 22, 3, 3, '#b89868');
+      break;
+
+    case T.HOUSE_WALL:
+      drawPixelRect(x, y, TILE, TILE, '#d4a060');
+      drawPixelRect(x, y, TILE, 2, '#c09050');
+      drawPixelRect(x, y + TILE - 2, TILE, 2, '#c09050');
+      // Window
+      if ((tx === 4 || tx === 6) && ty === 5) {
+        drawPixelRect(x + 8, y + 8, 16, 16, '#80c8f0');
+        drawPixelRect(x + 15, y + 8, 2, 16, '#c09050');
+        drawPixelRect(x + 8, y + 15, 16, 2, '#c09050');
+      }
+      break;
+
+    case T.HOUSE_ROOF:
+      drawPixelRect(x, y, TILE, TILE, '#c04040');
+      drawPixelRect(x, y + TILE - 4, TILE, 4, '#a03030');
+      break;
+
+    case T.HOUSE_DOOR:
+      drawPixelRect(x, y, TILE, TILE, '#d4a060');
+      drawPixelRect(x + 8, y + 2, 16, TILE - 2, '#8b4513');
+      drawPixelRect(x + 20, y + 14, 3, 3, '#f0d020');
+      break;
+
+    case T.SHOP_WALL:
+      drawPixelRect(x, y, TILE, TILE, '#6888b0');
+      drawPixelRect(x, y, TILE, 2, '#5878a0');
+      drawPixelRect(x, y + TILE - 2, TILE, 2, '#5878a0');
+      if ((tx === 4 || tx === 6) && ty === 13) {
+        drawPixelRect(x + 8, y + 8, 16, 16, '#80c8f0');
+        drawPixelRect(x + 15, y + 8, 2, 16, '#5878a0');
+        drawPixelRect(x + 8, y + 15, 16, 2, '#5878a0');
+      }
+      break;
+
+    case T.SHOP_ROOF:
+      drawPixelRect(x, y, TILE, TILE, '#4060a0');
+      drawPixelRect(x, y + TILE - 4, TILE, 4, '#305090');
+      break;
+
+    case T.SHOP_DOOR:
+      drawPixelRect(x, y, TILE, TILE, '#6888b0');
+      drawPixelRect(x + 8, y + 2, 16, TILE - 2, '#4a3020');
+      drawPixelRect(x + 20, y + 14, 3, 3, '#f0d020');
+      // "SHOP" sign
+      ctx.fillStyle = '#f0e0a0';
+      ctx.font = '7px monospace';
+      ctx.fillText('SHOP', x + 6, y - 2);
+      break;
+
+    case T.FENCE:
+      drawPixelRect(x, y, TILE, TILE, SEASON_GRASS[s]);
+      drawPixelRect(x + 14, y, 4, TILE, '#a08050');
+      drawPixelRect(x + 2, y + 8, TILE - 4, 3, '#a08050');
+      drawPixelRect(x + 2, y + 20, TILE - 4, 3, '#a08050');
+      break;
+
+    case T.TREE:
+      drawPixelRect(x, y, TILE, TILE, SEASON_GRASS[s]);
+      // Trunk
+      drawPixelRect(x + 12, y + 16, 8, 16, '#8b5e34');
+      drawPixelRect(x + 14, y + 18, 4, 14, '#a07040');
+      // Leaves
+      const treeCol = SEASON_TREE_COLORS[s];
+      drawPixelRect(x + 4, y + 2, 24, 18, treeCol);
+      drawPixelRect(x + 8, y, 16, 4, treeCol);
+      // Leaf highlights
+      drawPixelRect(x + 8, y + 4, 4, 4, shadeColor(treeCol, 20));
+      drawPixelRect(x + 18, y + 8, 4, 4, shadeColor(treeCol, 20));
+      if (s === 3) { // Snow on trees in winter
+        drawPixelRect(x + 6, y + 2, 20, 4, '#fff');
+        drawPixelRect(x + 10, y, 12, 3, '#eef');
+      }
+      break;
+
+    case T.FLOWER:
+      drawPixelRect(x, y, TILE, TILE, SEASON_GRASS[s]);
+      if (s !== 3) {
+        const flowerColors = ['#f06080', '#f0d040', '#8060f0', '#f09030'];
+        const fc = flowerColors[(tx * 3 + ty * 7) % flowerColors.length];
+        drawPixelRect(x + 12, y + 18, 2, 8, '#3a7a2a');
+        drawPixelRect(x + 10, y + 14, 6, 6, fc);
+        drawPixelRect(x + 12, y + 16, 2, 2, '#f0e040');
+        // Second flower
+        drawPixelRect(x + 22, y + 20, 2, 6, '#3a7a2a');
+        drawPixelRect(x + 20, y + 16, 6, 6, flowerColors[((tx * 3 + ty * 7) + 1) % flowerColors.length]);
+        drawPixelRect(x + 22, y + 18, 2, 2, '#f0e040');
+      }
+      break;
+
+    case T.ROCK:
+      drawPixelRect(x, y, TILE, TILE, SEASON_GRASS[s]);
+      drawPixelRect(x + 6, y + 10, 20, 16, '#808080');
+      drawPixelRect(x + 8, y + 8, 16, 4, '#909090');
+      drawPixelRect(x + 10, y + 12, 4, 4, '#a0a0a0');
+      break;
+
+    case T.BED:
+      drawPixelRect(x, y, TILE, TILE, '#d4a060');
+      drawPixelRect(x + 4, y + 4, 24, 24, '#e0d0b0');
+      drawPixelRect(x + 4, y + 4, 24, 10, '#f0f0f0');
+      drawPixelRect(x + 6, y + 14, 20, 14, '#6090c0');
+      break;
+
+    case T.SHIPPING_BIN:
+      drawPixelRect(x, y, TILE, TILE, SEASON_GRASS[s]);
+      drawPixelRect(x + 2, y + 8, 28, 22, '#8b4513');
+      drawPixelRect(x + 2, y + 8, 28, 4, '#a05520');
+      drawPixelRect(x + 4, y + 6, 24, 4, '#a05520');
+      drawPixelRect(x + 12, y + 18, 8, 4, '#d4a060');
+      break;
+  }
+}
+
+function shadeColor(color, amount) {
+  let r = parseInt(color.slice(1,3), 16) + amount;
+  let g = parseInt(color.slice(3,5), 16) + amount;
+  let b = parseInt(color.slice(5,7), 16) + amount;
+  r = Math.min(255, Math.max(0, r));
+  g = Math.min(255, Math.max(0, g));
+  b = Math.min(255, Math.max(0, b));
+  return `rgb(${r},${g},${b})`;
+}
+
+// ============================================================
+// DRAW PLAYER
+// ============================================================
+function drawPlayer(px, py) {
+  const p = game.player;
+  const dir = p.dir;
+  const frame = Math.floor(p.frame) % 4;
+  const x = Math.floor(px);
+  const y = Math.floor(py);
+
+  const bobY = p.moving ? (frame % 2 === 0 ? -1 : 1) : 0;
+  const drawY = y + bobY;
+
+  // Shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.2)';
+  ctx.beginPath();
+  ctx.ellipse(x + 16, y + 31, 8, 3, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Body
+  ctx.fillStyle = '#4477cc'; // Shirt
+  drawPixelRect(x + 8, drawY + 14, 16, 10, '#4477cc');
+
+  // Legs
+  const legOffset = p.moving ? (frame % 2 === 0 ? 2 : -2) : 0;
+  drawPixelRect(x + 10, drawY + 24, 5, 6, '#6b4226'); // Left leg
+  drawPixelRect(x + 17, drawY + 24, 5, 6, '#6b4226'); // Right leg
+  if (p.moving) {
+    drawPixelRect(x + 10 + legOffset, drawY + 24, 5, 6, '#6b4226');
+    drawPixelRect(x + 17 - legOffset, drawY + 24, 5, 6, '#6b4226');
+  }
+
+  // Arms
+  if (dir === 1) {
+    drawPixelRect(x + 6, drawY + 14, 4, 8, '#4477cc');
+    drawPixelRect(x + 22, drawY + 14, 4, 8, '#4477cc');
+    drawPixelRect(x + 6, drawY + 20, 4, 3, '#f0c8a0');
+    drawPixelRect(x + 22, drawY + 20, 4, 3, '#f0c8a0');
+  } else if (dir === 3) {
+    drawPixelRect(x + 6, drawY + 14, 4, 8, '#4477cc');
+    drawPixelRect(x + 22, drawY + 14, 4, 8, '#4477cc');
+    drawPixelRect(x + 6, drawY + 20, 4, 3, '#f0c8a0');
+    drawPixelRect(x + 22, drawY + 20, 4, 3, '#f0c8a0');
+  } else {
+    drawPixelRect(x + 6, drawY + 15, 4, 7, '#4477cc');
+    drawPixelRect(x + 22, drawY + 15, 4, 7, '#4477cc');
+    drawPixelRect(x + 6, drawY + 20, 4, 3, '#f0c8a0');
+    drawPixelRect(x + 22, drawY + 20, 4, 3, '#f0c8a0');
+  }
+
+  // Head
+  drawPixelRect(x + 8, drawY + 2, 16, 14, '#f0c8a0'); // Face
+
+  // Hat
+  drawPixelRect(x + 6, drawY, 20, 6, '#cc6633');
+  drawPixelRect(x + 4, drawY + 4, 24, 3, '#cc6633');
+
+  // Eyes
+  if (dir === 0) { // Up - show back of head
+    drawPixelRect(x + 8, drawY + 2, 16, 12, '#8b5e34'); // Hair
+  } else if (dir === 2) { // Down - show face
+    drawPixelRect(x + 11, drawY + 8, 3, 3, '#333');
+    drawPixelRect(x + 18, drawY + 8, 3, 3, '#333');
+    drawPixelRect(x + 12, drawY + 8, 1, 1, '#fff');
+    drawPixelRect(x + 19, drawY + 8, 1, 1, '#fff');
+    drawPixelRect(x + 13, drawY + 13, 6, 2, '#e0a080');
+  } else { // Side
+    const ex = dir === 1 ? 17 : 10;
+    drawPixelRect(x + ex, drawY + 8, 3, 3, '#333');
+    drawPixelRect(x + ex + 1, drawY + 8, 1, 1, '#fff');
+    drawPixelRect(x + ex - 1, drawY + 13, 6, 2, '#e0a080');
+  }
+
+  // Draw held tool indicator
+  const tool = TOOLS[game.selectedTool];
+  ctx.font = '12px monospace';
+  ctx.fillText(tool.icon, x + 24, drawY + 4);
+}
+
+// ============================================================
+// DRAW CROPS
+// ============================================================
+function drawCrop(screenX, screenY, crop) {
+  const x = screenX, y = screenY;
+  const def = CROPS[crop.type];
+  const stage = Math.min(3, Math.floor((crop.days / crop.maxDays) * 4));
+
+  switch (stage) {
+    case 0: // Seed
+      drawPixelRect(x + 14, y + 22, 4, 4, '#8b5e34');
+      drawPixelRect(x + 12, y + 20, 2, 2, '#8b5e34');
+      break;
+    case 1: // Sprout
+      drawPixelRect(x + 15, y + 16, 2, 10, '#5a8a3a');
+      drawPixelRect(x + 12, y + 14, 3, 4, def.leafColor);
+      drawPixelRect(x + 17, y + 16, 3, 3, def.leafColor);
+      break;
+    case 2: // Growing
+      drawPixelRect(x + 15, y + 10, 2, 16, '#4a7a2a');
+      drawPixelRect(x + 10, y + 10, 5, 5, def.leafColor);
+      drawPixelRect(x + 17, y + 8, 5, 5, def.leafColor);
+      drawPixelRect(x + 12, y + 16, 4, 3, def.leafColor);
+      break;
+    case 3: // Mature - ready to harvest!
+      drawPixelRect(x + 15, y + 8, 2, 18, '#4a7a2a');
+      drawPixelRect(x + 9, y + 6, 6, 6, def.leafColor);
+      drawPixelRect(x + 17, y + 4, 6, 6, def.leafColor);
+      drawPixelRect(x + 11, y + 14, 5, 4, def.leafColor);
+      // Fruit/vegetable
+      drawPixelRect(x + 11, y + 10, 6, 6, def.color);
+      drawPixelRect(x + 18, y + 8, 5, 5, def.color);
+      // Sparkle for mature crops
+      if (Math.floor(game.titleFrame / 15) % 2 === 0) {
+        drawPixelRect(x + 8, y + 4, 2, 2, '#fff');
+        drawPixelRect(x + 24, y + 8, 2, 2, '#fff');
+      }
+      break;
+  }
+}
+
+// ============================================================
+// UPDATE FUNCTIONS
+// ============================================================
+function updateTitle(dt) {
+  game.titleFrame++;
+  if (isJustPressed('Space') || isJustPressed('Enter')) {
+    game.state = 'PLAYING';
+    game.map = generateMap();
+    sfxMenuOpen();
+
+    // Load saved game
+    loadGame();
+  }
+}
+
+function updatePlaying(dt) {
+  game.titleFrame++;
+  const p = game.player;
+
+  // Movement
+  let dx = 0, dy = 0;
+  if (keys['ArrowUp'] || keys['KeyW']) dy = -1;
+  if (keys['ArrowDown'] || keys['KeyS']) dy = 1;
+  if (keys['ArrowLeft'] || keys['KeyA']) dx = -1;
+  if (keys['ArrowRight'] || keys['KeyD']) dx = 1;
+
+  p.moving = dx !== 0 || dy !== 0;
+  if (p.moving) {
+    if (dy < 0) p.dir = 0;
+    else if (dx > 0) p.dir = 1;
+    else if (dy > 0) p.dir = 2;
+    else if (dx < 0) p.dir = 3;
+
+    const speed = PLAYER_SPEED;
+    const newX = p.x + dx * speed;
+    const newY = p.y + dy * speed;
+
+    // Collision detection
+    if (canWalk(newX, p.y)) p.x = newX;
+    if (canWalk(p.x, newY)) p.y = newY;
+
+    // Clamp to map
+    p.x = Math.max(TILE, Math.min((MAP_W - 2) * TILE, p.x));
+    p.y = Math.max(TILE, Math.min((MAP_H - 2) * TILE, p.y));
+
+    p.frameTimer += dt;
+    if (p.frameTimer > 0.15) {
+      p.frame++;
+      p.frameTimer = 0;
+      if (p.frame % 4 === 0) sfxStep();
+    }
+  } else {
+    p.frameTimer = 0;
+  }
+
+  // Tool selection with number keys
+  if (isJustPressed('Digit1')) { game.selectedTool = 0; sfxSelect(); }
+  if (isJustPressed('Digit2')) { game.selectedTool = 1; sfxSelect(); }
+  if (isJustPressed('Digit3')) { game.selectedTool = 2; sfxSelect(); }
+  if (isJustPressed('Digit4')) { game.selectedTool = 3; sfxSelect(); }
+
+  // Tab to cycle tools
+  if (isJustPressed('Tab')) {
+    game.selectedTool = (game.selectedTool + 1) % TOOLS.length;
+    sfxSelect();
+  }
+
+  // Q/E to cycle seed types
+  if (isJustPressed('KeyQ')) { cycleSeed(-1); sfxSelect(); }
+  if (isJustPressed('KeyE')) { cycleSeed(1); sfxSelect(); }
+
+  // Action (Space)
+  if (isJustPressed('Space') || isJustPressed('Enter')) {
+    performAction();
+  }
+
+  // Open shop when near shop door
+  const facingTile = getFacingTile();
+  if (isJustPressed('KeyF')) {
+    if (facingTile.type === T.SHOP_DOOR) {
+      game.state = 'SHOP';
+      game.shopCursor = 0;
+      game.shopTab = 'buy';
+      sfxMenuOpen();
+    } else if (facingTile.type === T.HOUSE_DOOR || facingTile.type === T.BED) {
+      // Sleep
+      startSleep();
+    } else if (facingTile.type === T.SHIPPING_BIN) {
+      sellAllHarvest();
+    }
+  }
+
+  // Time progression
+  updateTime(dt);
+
+  // Camera
+  updateCamera();
+
+  // Particles
+  updateParticles(dt);
+
+  // Messages
+  game.messages = game.messages.filter(m => { m.timer--; return m.timer > 0; });
+
+  // Weather effect - rain waters all crops
+  if (game.weather === 'rainy') {
+    // Rain particle effects
+    if (game.titleFrame % 3 === 0) {
+      const cx = game.camera.x + Math.random() * CANVAS_W;
+      const cy = game.camera.y + Math.random() * CANVAS_H;
+      game.particles.push({
+        x: cx, y: cy, vx: -0.5, vy: 4, life: 15, maxLife: 15,
+        color: '#80a0d0', size: 1,
+      });
+    }
+  }
+
+  // Auto-sleep at 2am
+  if (game.time.hour >= 26) { // 2am next day
+    addMessage('疲れて倒れてしまった...', 120);
+    p.energy = Math.floor(MAX_ENERGY * 0.5);
+    startSleep();
+  }
+}
+
+function updateShop(dt) {
+  game.titleFrame++;
+  const seedKeys = Object.keys(CROPS);
+  const harvestKeys = Object.keys(game.inventory.harvest).filter(k => game.inventory.harvest[k] > 0);
+  const currentList = game.shopTab === 'buy' ? seedKeys : harvestKeys;
+  const maxCursor = currentList.length - 1;
+
+  if (isJustPressed('ArrowUp') || isJustPressed('KeyW')) {
+    game.shopCursor = Math.max(0, game.shopCursor - 1); sfxSelect();
+  }
+  if (isJustPressed('ArrowDown') || isJustPressed('KeyS')) {
+    game.shopCursor = Math.min(maxCursor, game.shopCursor + 1); sfxSelect();
+  }
+  if (isJustPressed('ArrowLeft') || isJustPressed('ArrowRight') || isJustPressed('KeyA') || isJustPressed('KeyD')) {
+    game.shopTab = game.shopTab === 'buy' ? 'sell' : 'buy';
+    game.shopCursor = 0;
+    sfxSelect();
+  }
+
+  if (isJustPressed('Space') || isJustPressed('Enter')) {
+    if (game.shopTab === 'buy' && currentList.length > 0) {
+      const cropKey = currentList[game.shopCursor];
+      const crop = CROPS[cropKey];
+      if (game.money >= crop.buyPrice) {
+        game.money -= crop.buyPrice;
+        game.inventory.seeds[cropKey]++;
+        sfxCoin();
+        addMessage(`${crop.name}のタネを購入！ (-${crop.buyPrice}G)`);
+      } else {
+        sfxError();
+        addMessage('お金が足りません！');
+      }
+    } else if (game.shopTab === 'sell' && currentList.length > 0) {
+      const cropKey = currentList[game.shopCursor];
+      const crop = CROPS[cropKey];
+      if (game.inventory.harvest[cropKey] > 0) {
+        game.inventory.harvest[cropKey]--;
+        game.money += crop.sellPrice;
+        sfxCoin();
+        addMessage(`${crop.name}を売却！ (+${crop.sellPrice}G)`);
+      }
+    }
+  }
+
+  if (isJustPressed('Escape') || isJustPressed('KeyF')) {
+    game.state = 'PLAYING';
+    sfxMenuOpen();
+  }
+}
+
+function updateSleeping(dt) {
+  game.titleFrame++;
+  game.fadeAlpha += 0.02;
+  if (game.fadeAlpha >= 1.5) {
+    advanceDay();
+    game.fadeAlpha = 0;
+    game.state = 'PLAYING';
+    game.player.energy = MAX_ENERGY;
+    addMessage(`${game.time.season === 0 ? '春' : game.time.season === 1 ? '夏' : game.time.season === 2 ? '秋' : '冬'} ${game.time.day}日目 - おはよう！`, 150);
+    saveGame();
+  }
+}
+
+// ============================================================
+// GAME LOGIC HELPERS
+// ============================================================
+function canWalk(x, y) {
+  const checkPoints = [
+    { x: x + 6, y: y + 20 },
+    { x: x + 26, y: y + 20 },
+    { x: x + 6, y: y + 30 },
+    { x: x + 26, y: y + 30 },
+  ];
+  for (const pt of checkPoints) {
+    const tx = Math.floor(pt.x / TILE);
+    const ty = Math.floor(pt.y / TILE);
+    if (tx < 0 || tx >= MAP_W || ty < 0 || ty >= MAP_H) return false;
+    const tile = game.map[ty][tx];
+    if (tile === T.WATER || tile === T.TREE || tile === T.ROCK ||
+        tile === T.HOUSE_WALL || tile === T.SHOP_WALL || tile === T.FENCE ||
+        tile === T.HOUSE_ROOF || tile === T.SHOP_ROOF) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function getFacingTile() {
+  const p = game.player;
+  const cx = Math.floor((p.x + 16) / TILE);
+  const cy = Math.floor((p.y + 16) / TILE);
+  let tx = cx, ty = cy;
+  if (p.dir === 0) ty--;
+  else if (p.dir === 1) tx++;
+  else if (p.dir === 2) ty++;
+  else if (p.dir === 3) tx--;
+
+  if (tx < 0 || tx >= MAP_W || ty < 0 || ty >= MAP_H) return { x: tx, y: ty, type: -1 };
+  return { x: tx, y: ty, type: game.map[ty][tx] };
+}
+
+function performAction() {
+  const tool = TOOLS[game.selectedTool];
+  const facing = getFacingTile();
+  const p = game.player;
+
+  if (p.energy <= 0) {
+    addMessage('体力がありません！寝ましょう。');
+    sfxError();
+    return;
+  }
+
+  const cropKey = `${facing.x},${facing.y}`;
+
+  switch (tool.id) {
+    case 'hoe':
+      if (facing.type === T.DIRT) {
+        game.map[facing.y][facing.x] = T.TILLED;
+        p.energy -= 2;
+        sfxTill();
+        addParticle(facing.x * TILE + 16 - game.camera.x + game.camera.x, facing.y * TILE + 16, '#8b5e34', 6, 12);
+        addMessage('土を耕した！');
+      } else if (facing.type !== T.TILLED && facing.type !== T.WATERED) {
+        sfxError();
+        addMessage('ここは耕せません');
+      } else {
+        sfxError();
+        addMessage('もう耕してあります');
+      }
+      break;
+
+    case 'water':
+      if (facing.type === T.TILLED || facing.type === T.WATERED) {
+        game.map[facing.y][facing.x] = T.WATERED;
+        if (game.crops[cropKey]) game.crops[cropKey].watered = true;
+        p.energy -= 1;
+        sfxWater();
+        addParticle(facing.x * TILE + 16, facing.y * TILE + 16, '#80b0e0', 8, 15);
+        addMessage('水をやった！');
+      } else {
+        sfxError();
+        addMessage('耕した土に水をやれます');
+      }
+      break;
+
+    case 'seed':
+      if ((facing.type === T.TILLED || facing.type === T.WATERED) && !game.crops[cropKey]) {
+        const seedType = game.selectedSeed;
+        if (game.inventory.seeds[seedType] > 0) {
+          const crop = CROPS[seedType];
+          // Season check
+          if (crop.season !== game.time.season && game.time.season !== 3) {
+            // Allow planting but warn
+          }
+          if (game.time.season === 3) {
+            sfxError();
+            addMessage('冬は作物を育てられません');
+            return;
+          }
+          game.inventory.seeds[seedType]--;
+          game.crops[cropKey] = {
+            type: seedType, days: 0, watered: facing.type === T.WATERED,
+            maxDays: crop.days,
+          };
+          p.energy -= 1;
+          sfxPlant();
+          addMessage(`${crop.name}のタネを植えた！`);
+        } else {
+          sfxError();
+          addMessage(`${CROPS[seedType].name}のタネがありません`);
+        }
+      } else if (game.crops[cropKey]) {
+        sfxError();
+        addMessage('もう植えてあります');
+      } else {
+        sfxError();
+        addMessage('耕した土に植えられます');
+      }
+      break;
+
+    case 'harvest':
+      if (game.crops[cropKey]) {
+        const crop = game.crops[cropKey];
+        const stage = Math.min(3, Math.floor((crop.days / crop.maxDays) * 4));
+        if (stage >= 3) {
+          game.inventory.harvest[crop.type]++;
+          delete game.crops[cropKey];
+          game.map[facing.y][facing.x] = T.DIRT;
+          sfxHarvest();
+          addParticle(facing.x * TILE + 16, facing.y * TILE + 10, '#f0d040', 10, 20);
+          addMessage(`${CROPS[crop.type].name}を収穫した！`);
+        } else {
+          sfxError();
+          addMessage('まだ育っていません');
+        }
+      } else {
+        sfxError();
+        addMessage('収穫できるものがありません');
+      }
+      break;
+  }
+}
+
+function cycleSeed(dir) {
+  const seedKeys = Object.keys(CROPS);
+  let idx = seedKeys.indexOf(game.selectedSeed);
+  idx = (idx + dir + seedKeys.length) % seedKeys.length;
+  game.selectedSeed = seedKeys[idx];
+  addMessage(`タネ: ${CROPS[game.selectedSeed].name}`, 60);
+}
+
+function updateTime(dt) {
+  game.time.timer += dt;
+  const minutesPerSecond = (24 * 60) / DAY_LENGTH;
+  if (game.time.timer >= 1 / minutesPerSecond) {
+    game.time.timer = 0;
+    game.time.minute += 10;
+    if (game.time.minute >= 60) {
+      game.time.minute = 0;
+      game.time.hour++;
+    }
+  }
+}
+
+function advanceDay() {
+  game.time.day++;
+  game.time.hour = 6;
+  game.time.minute = 0;
+  game.time.timer = 0;
+
+  // Decide weather
+  game.weather = Math.random() < 0.25 ? 'rainy' : 'sunny';
+
+  // Grow crops
+  for (const key of Object.keys(game.crops)) {
+    const crop = game.crops[key];
+    if (crop.watered) {
+      crop.days++;
+    }
+    crop.watered = false;
+
+    // Rain waters everything
+    if (game.weather === 'rainy') {
+      crop.watered = true;
+      const [cx, cy] = key.split(',').map(Number);
+      game.map[cy][cx] = T.WATERED;
+    }
+  }
+
+  // Reset watered tiles (non-crop)
+  for (let y = 0; y < MAP_H; y++) {
+    for (let x = 0; x < MAP_W; x++) {
+      if (game.map[y][x] === T.WATERED && !game.crops[`${x},${y}`]) {
+        if (game.weather !== 'rainy') game.map[y][x] = T.TILLED;
+      }
+    }
+  }
+
+  // Season change
+  if (game.time.day > 28) {
+    game.time.day = 1;
+    game.time.season = (game.time.season + 1) % 4;
+    if (game.time.season === 0) game.time.year++;
+
+    addMessage(`${SEASONS[game.time.season]}になりました！`, 180);
+
+    // Winter kills crops
+    if (game.time.season === 3) {
+      for (const key of Object.keys(game.crops)) {
+        delete game.crops[key];
+      }
+      addMessage('冬が来て作物が枯れてしまった...', 180);
+    }
+
+    // Season change - crops out of season wither
+    for (const key of Object.keys(game.crops)) {
+      const crop = game.crops[key];
+      if (CROPS[crop.type].season !== game.time.season) {
+        delete game.crops[key];
+      }
+    }
+  }
+}
+
+function startSleep() {
+  game.state = 'SLEEPING';
+  game.fadeAlpha = 0;
+  sfxSleep();
+}
+
+function sellAllHarvest() {
+  let total = 0;
+  let count = 0;
+  for (const key of Object.keys(game.inventory.harvest)) {
+    const amount = game.inventory.harvest[key];
+    if (amount > 0) {
+      total += CROPS[key].sellPrice * amount;
+      count += amount;
+      game.inventory.harvest[key] = 0;
+    }
+  }
+  if (count > 0) {
+    game.money += total;
+    sfxCoin();
+    addMessage(`${count}個の作物を出荷！ (+${total}G)`);
+  } else {
+    sfxError();
+    addMessage('出荷する作物がありません');
+  }
+}
+
+function updateCamera() {
+  const p = game.player;
+  const targetX = p.x - CANVAS_W / 2 + 16;
+  const targetY = p.y - CANVAS_H / 2 + 16;
+  game.camera.x += (targetX - game.camera.x) * 0.1;
+  game.camera.y += (targetY - game.camera.y) * 0.1;
+  game.camera.x = Math.max(0, Math.min(MAP_W * TILE - CANVAS_W, game.camera.x));
+  game.camera.y = Math.max(0, Math.min(MAP_H * TILE - CANVAS_H, game.camera.y));
+}
+
+function updateParticles(dt) {
+  game.particles = game.particles.filter(p => {
+    p.x += p.vx;
+    p.y += p.vy;
+    p.vy += 0.1;
+    p.life--;
+    return p.life > 0;
+  });
+}
+
+// ============================================================
+// SAVE/LOAD
+// ============================================================
+function saveGame() {
+  try {
+    const save = {
+      player: { x: game.player.x, y: game.player.y, energy: game.player.energy },
+      time: { ...game.time },
+      money: game.money,
+      selectedSeed: game.selectedSeed,
+      inventory: JSON.parse(JSON.stringify(game.inventory)),
+      crops: JSON.parse(JSON.stringify(game.crops)),
+      weather: game.weather,
+      mapTilled: [],
+    };
+    // Save tilled/watered tiles
+    for (let y = 0; y < MAP_H; y++) {
+      for (let x = 0; x < MAP_W; x++) {
+        if (game.map[y][x] === T.TILLED || game.map[y][x] === T.WATERED) {
+          save.mapTilled.push({ x, y, type: game.map[y][x] });
+        }
+      }
+    }
+    localStorage.setItem('honobono_farm_save', JSON.stringify(save));
+  } catch(e) {}
+}
+
+function loadGame() {
+  try {
+    const data = localStorage.getItem('honobono_farm_save');
+    if (!data) return;
+    const save = JSON.parse(data);
+    game.player.x = save.player.x;
+    game.player.y = save.player.y;
+    game.player.energy = save.player.energy;
+    game.time = { ...save.time };
+    game.money = save.money;
+    game.selectedSeed = save.selectedSeed || 'turnip';
+    game.inventory = save.inventory;
+    game.crops = save.crops;
+    game.weather = save.weather;
+    if (save.mapTilled) {
+      save.mapTilled.forEach(t => { game.map[t.y][t.x] = t.type; });
+    }
+  } catch(e) {}
+}
+
+// ============================================================
+// RENDER FUNCTIONS
+// ============================================================
+function renderTitle() {
+  game.titleFrame++;
+
+  // Background
+  ctx.fillStyle = '#2a4a1a';
+  ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+  // Draw animated farm scene
+  const grassY = CANVAS_H * 0.45;
+  ctx.fillStyle = '#5aad3c';
+  ctx.fillRect(0, grassY, CANVAS_W, CANVAS_H - grassY);
+
+  // Sky
+  const gradient = ctx.createLinearGradient(0, 0, 0, grassY);
+  gradient.addColorStop(0, '#4090e0');
+  gradient.addColorStop(1, '#80c0f0');
+  ctx.fillStyle = gradient;
+  ctx.fillRect(0, 0, CANVAS_W, grassY);
+
+  // Sun
+  const sunY = 60 + Math.sin(game.titleFrame * 0.01) * 10;
+  ctx.fillStyle = '#f0e040';
+  ctx.beginPath();
+  ctx.arc(520, sunY, 30, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#f8f070';
+  ctx.beginPath();
+  ctx.arc(520, sunY, 24, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Clouds
+  for (let i = 0; i < 3; i++) {
+    const cx = ((game.titleFrame * 0.3 + i * 220) % (CANVAS_W + 100)) - 50;
+    const cy = 40 + i * 35;
+    ctx.fillStyle = 'rgba(255,255,255,0.8)';
+    ctx.beginPath();
+    ctx.ellipse(cx, cy, 40, 15, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.ellipse(cx - 20, cy + 5, 25, 12, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.ellipse(cx + 25, cy + 5, 30, 12, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Hills
+  ctx.fillStyle = '#4a9a30';
+  ctx.beginPath();
+  ctx.moveTo(0, grassY + 10);
+  for (let x = 0; x <= CANVAS_W; x += 10) {
+    ctx.lineTo(x, grassY + Math.sin(x * 0.01 + 1) * 20 - 10);
+  }
+  ctx.lineTo(CANVAS_W, CANVAS_H);
+  ctx.lineTo(0, CANVAS_H);
+  ctx.fill();
+
+  // Fence
+  for (let x = 0; x < CANVAS_W; x += 40) {
+    ctx.fillStyle = '#a08050';
+    ctx.fillRect(x + 18, grassY + 20, 4, 30);
+    ctx.fillRect(x, grassY + 25, 40, 3);
+    ctx.fillRect(x, grassY + 38, 40, 3);
+  }
+
+  // Title
+  ctx.fillStyle = '#fff';
+  ctx.strokeStyle = '#4a3020';
+  ctx.lineWidth = 4;
+  ctx.font = 'bold 48px monospace';
+  ctx.textAlign = 'center';
+  ctx.strokeText('ほのぼの農園', CANVAS_W / 2, 180);
+  ctx.fillText('ほのぼの農園', CANVAS_W / 2, 180);
+
+  ctx.font = '18px monospace';
+  ctx.lineWidth = 2;
+  ctx.strokeText('~ Farming Simulation ~', CANVAS_W / 2, 215);
+  ctx.fillStyle = '#f0e8c0';
+  ctx.fillText('~ Farming Simulation ~', CANVAS_W / 2, 215);
+
+  // Blinking "Press Space"
+  if (Math.floor(game.titleFrame / 30) % 2 === 0) {
+    ctx.fillStyle = '#fff';
+    ctx.font = '16px monospace';
+    ctx.fillText('[ SPACE キーでスタート ]', CANVAS_W / 2, CANVAS_H - 60);
+  }
+
+  // Controls info
+  ctx.fillStyle = 'rgba(0,0,0,0.5)';
+  ctx.fillRect(CANVAS_W / 2 - 200, CANVAS_H - 45, 400, 38);
+  ctx.fillStyle = '#ddd';
+  ctx.font = '11px monospace';
+  ctx.fillText('WASD/矢印:移動 | SPACE:アクション | F:施設 | 1-4:道具 | Q/E:タネ切替', CANVAS_W / 2, CANVAS_H - 22);
+
+  ctx.textAlign = 'left';
+}
+
+function renderPlaying() {
+  const cam = game.camera;
+
+  // Calculate visible tile range
+  const startTX = Math.max(0, Math.floor(cam.x / TILE));
+  const startTY = Math.max(0, Math.floor(cam.y / TILE));
+  const endTX = Math.min(MAP_W - 1, Math.ceil((cam.x + CANVAS_W) / TILE));
+  const endTY = Math.min(MAP_H - 1, Math.ceil((cam.y + CANVAS_H) / TILE));
+
+  // Draw tiles
+  for (let ty = startTY; ty <= endTY; ty++) {
+    for (let tx = startTX; tx <= endTX; tx++) {
+      const screenX = tx * TILE - cam.x;
+      const screenY = ty * TILE - cam.y;
+      drawTile(tx, ty, game.map[ty][tx], screenX, screenY);
+
+      // Draw crops
+      const cropKey = `${tx},${ty}`;
+      if (game.crops[cropKey]) {
+        drawCrop(screenX, screenY, game.crops[cropKey]);
+      }
+    }
+  }
+
+  // Draw player
+  const playerScreenX = game.player.x - cam.x;
+  const playerScreenY = game.player.y - cam.y;
+  drawPlayer(playerScreenX, playerScreenY);
+
+  // Draw facing tile indicator
+  const facing = getFacingTile();
+  if (facing.type >= 0) {
+    const fx = facing.x * TILE - cam.x;
+    const fy = facing.y * TILE - cam.y;
+    ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(fx + 1, fy + 1, TILE - 2, TILE - 2);
+  }
+
+  // Draw particles
+  game.particles.forEach(p => {
+    const alpha = p.life / p.maxLife;
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = p.color;
+    ctx.fillRect(p.x - cam.x, p.y - cam.y, p.size, p.size);
+  });
+  ctx.globalAlpha = 1;
+
+  // Day/night overlay
+  const hour = game.time.hour;
+  let nightAlpha = 0;
+  if (hour >= 19) nightAlpha = Math.min(0.5, (hour - 19) * 0.1);
+  else if (hour >= 6 && hour < 8) nightAlpha = Math.max(0, (8 - hour) * 0.1);
+  else if (hour < 6) nightAlpha = 0.4;
+
+  if (nightAlpha > 0) {
+    ctx.fillStyle = `rgba(10,10,40,${nightAlpha})`;
+    ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+  }
+
+  // Rain overlay
+  if (game.weather === 'rainy') {
+    ctx.fillStyle = 'rgba(100,100,130,0.15)';
+    ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+  }
+
+  // HUD
+  drawHUD();
+}
+
+function drawHUD() {
+  // Top bar
+  ctx.fillStyle = 'rgba(0,0,0,0.6)';
+  ctx.fillRect(0, 0, CANVAS_W, 36);
+
+  ctx.fillStyle = '#fff';
+  ctx.font = '13px monospace';
+
+  // Time
+  const h = game.time.hour % 24;
+  const m = game.time.minute;
+  const timeStr = `${h.toString().padStart(2,'0')}:${m.toString().padStart(2,'0')}`;
+  ctx.fillText(`🕐 ${timeStr}`, 10, 14);
+
+  // Season/Day
+  const seasonName = ['春','夏','秋','冬'][game.time.season];
+  ctx.fillText(`📅 ${game.time.year}年目 ${seasonName} ${game.time.day}日`, 10, 30);
+
+  // Money
+  ctx.fillStyle = '#f0d040';
+  ctx.fillText(`💰 ${game.money}G`, 200, 14);
+
+  // Weather
+  const weatherIcon = game.weather === 'rainy' ? '🌧' : '☀';
+  ctx.fillStyle = '#fff';
+  ctx.fillText(`${weatherIcon}`, 200, 30);
+
+  // Energy bar
+  const energyW = 100;
+  const energyH = 10;
+  const energyX = CANVAS_W - energyW - 60;
+  const energyY = 6;
+  ctx.fillStyle = '#333';
+  ctx.fillRect(energyX, energyY, energyW, energyH);
+  const energyRatio = game.player.energy / MAX_ENERGY;
+  const energyColor = energyRatio > 0.5 ? '#50c050' : energyRatio > 0.25 ? '#e0c030' : '#e03030';
+  ctx.fillStyle = energyColor;
+  ctx.fillRect(energyX, energyY, energyW * energyRatio, energyH);
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(energyX, energyY, energyW, energyH);
+  ctx.fillStyle = '#fff';
+  ctx.font = '10px monospace';
+  ctx.fillText(`体力`, energyX + energyW + 4, energyY + 9);
+
+  // Tool bar
+  const toolBarY = CANVAS_H - 44;
+  ctx.fillStyle = 'rgba(0,0,0,0.6)';
+  ctx.fillRect(0, toolBarY, CANVAS_W, 44);
+
+  TOOLS.forEach((tool, i) => {
+    const tx = 10 + i * 80;
+    const ty = toolBarY + 4;
+    const selected = i === game.selectedTool;
+
+    ctx.fillStyle = selected ? 'rgba(255,255,255,0.3)' : 'rgba(255,255,255,0.1)';
+    ctx.fillRect(tx, ty, 72, 36);
+    if (selected) {
+      ctx.strokeStyle = '#f0d040';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(tx, ty, 72, 36);
+    }
+
+    ctx.font = '16px monospace';
+    ctx.fillText(tool.icon, tx + 4, ty + 22);
+    ctx.fillStyle = '#fff';
+    ctx.font = '11px monospace';
+    ctx.fillText(`${i + 1}.${tool.name}`, tx + 22, ty + 16);
+
+    // Show seed type and count for seed tool
+    if (tool.id === 'seed') {
+      const seedDef = CROPS[game.selectedSeed];
+      ctx.fillStyle = '#aaf';
+      ctx.font = '9px monospace';
+      ctx.fillText(`${seedDef.name}x${game.inventory.seeds[game.selectedSeed]}`, tx + 22, ty + 28);
+    }
+  });
+
+  // Inventory summary (right side of toolbar)
+  const invX = CANVAS_W - 180;
+  ctx.fillStyle = '#ccc';
+  ctx.font = '10px monospace';
+  let invY = toolBarY + 12;
+  let hasHarvest = false;
+  for (const key of Object.keys(game.inventory.harvest)) {
+    if (game.inventory.harvest[key] > 0) {
+      if (!hasHarvest) { ctx.fillText('収穫:', invX, invY); invY += 12; hasHarvest = true; }
+      ctx.fillText(`${CROPS[key].name}: ${game.inventory.harvest[key]}`, invX + 10, invY);
+      invY += 11;
+    }
+  }
+
+  // Messages
+  game.messages.forEach((msg, i) => {
+    const alpha = Math.min(1, msg.timer / 30);
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = 'rgba(0,0,0,0.7)';
+    const msgY = 50 + i * 28;
+    ctx.fillRect(CANVAS_W / 2 - 160, msgY, 320, 24);
+    ctx.fillStyle = '#fff';
+    ctx.font = '12px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(msg.text, CANVAS_W / 2, msgY + 16);
+    ctx.textAlign = 'left';
+  });
+  ctx.globalAlpha = 1;
+
+  // Interaction hint
+  const facing = getFacingTile();
+  if (facing.type === T.SHOP_DOOR) {
+    drawInteractionHint('F: ショップに入る');
+  } else if (facing.type === T.HOUSE_DOOR || facing.type === T.BED) {
+    drawInteractionHint('F: 寝る (次の日へ)');
+  } else if (facing.type === T.SHIPPING_BIN) {
+    drawInteractionHint('F: 作物を出荷する');
+  }
+}
+
+function drawInteractionHint(text) {
+  ctx.fillStyle = 'rgba(0,0,0,0.7)';
+  ctx.textAlign = 'center';
+  const hintY = CANVAS_H - 55;
+  ctx.fillRect(CANVAS_W / 2 - 120, hintY, 240, 20);
+  ctx.fillStyle = '#f0e080';
+  ctx.font = '11px monospace';
+  ctx.fillText(text, CANVAS_W / 2, hintY + 14);
+  ctx.textAlign = 'left';
+}
+
+function renderShop() {
+  // Background overlay
+  ctx.fillStyle = 'rgba(0,0,0,0.75)';
+  ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+  // Shop window
+  const shopX = 60, shopY = 40, shopW = CANVAS_W - 120, shopH = CANVAS_H - 80;
+  ctx.fillStyle = '#3a2820';
+  ctx.fillRect(shopX, shopY, shopW, shopH);
+  ctx.strokeStyle = '#a08050';
+  ctx.lineWidth = 3;
+  ctx.strokeRect(shopX, shopY, shopW, shopH);
+
+  // Title
+  ctx.fillStyle = '#f0d040';
+  ctx.font = 'bold 20px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('🏪 ショップ', CANVAS_W / 2, shopY + 30);
+
+  // Tabs
+  const tabW = shopW / 2 - 20;
+  ['buy', 'sell'].forEach((tab, i) => {
+    const tx = shopX + 10 + i * (tabW + 20);
+    const ty = shopY + 45;
+    ctx.fillStyle = game.shopTab === tab ? '#5a4030' : '#2a1810';
+    ctx.fillRect(tx, ty, tabW, 28);
+    ctx.strokeStyle = '#a08050';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(tx, ty, tabW, 28);
+    ctx.fillStyle = game.shopTab === tab ? '#f0d040' : '#888';
+    ctx.font = '14px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(tab === 'buy' ? '購入 (←→切替)' : '売却 (←→切替)', tx + tabW / 2, ty + 19);
+  });
+
+  // Items list
+  ctx.textAlign = 'left';
+  const listY = shopY + 85;
+  const seedKeys = Object.keys(CROPS);
+  const harvestKeys = Object.keys(game.inventory.harvest).filter(k => game.inventory.harvest[k] > 0);
+  const currentList = game.shopTab === 'buy' ? seedKeys : harvestKeys;
+
+  if (currentList.length === 0 && game.shopTab === 'sell') {
+    ctx.fillStyle = '#888';
+    ctx.font = '14px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('売却できる作物がありません', CANVAS_W / 2, listY + 40);
+    ctx.textAlign = 'left';
+  }
+
+  currentList.forEach((key, i) => {
+    const crop = CROPS[key];
+    const itemY = listY + i * 36;
+    const selected = i === game.shopCursor;
+
+    ctx.fillStyle = selected ? 'rgba(240,208,64,0.2)' : 'rgba(255,255,255,0.05)';
+    ctx.fillRect(shopX + 15, itemY, shopW - 30, 32);
+    if (selected) {
+      ctx.strokeStyle = '#f0d040';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(shopX + 15, itemY, shopW - 30, 32);
+    }
+
+    // Crop color swatch
+    ctx.fillStyle = crop.color;
+    ctx.fillRect(shopX + 22, itemY + 6, 20, 20);
+    ctx.strokeStyle = '#000';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(shopX + 22, itemY + 6, 20, 20);
+
+    ctx.fillStyle = '#fff';
+    ctx.font = '13px monospace';
+    ctx.fillText(crop.name, shopX + 50, itemY + 20);
+
+    if (game.shopTab === 'buy') {
+      const seasonStr = ['春', '夏', '秋', '冬'][crop.season];
+      ctx.fillStyle = '#aaa';
+      ctx.fillText(`${seasonStr} | ${crop.days}日`, shopX + 150, itemY + 20);
+      ctx.fillStyle = '#f0d040';
+      ctx.fillText(`${crop.buyPrice}G`, shopX + 300, itemY + 20);
+      ctx.fillStyle = '#aaa';
+      ctx.font = '10px monospace';
+      ctx.fillText(`所持: ${game.inventory.seeds[key]}`, shopX + 380, itemY + 20);
+    } else {
+      ctx.fillStyle = '#5aad3c';
+      ctx.fillText(`${crop.sellPrice}G`, shopX + 200, itemY + 20);
+      ctx.fillStyle = '#aaa';
+      ctx.fillText(`x${game.inventory.harvest[key]}`, shopX + 300, itemY + 20);
+    }
+  });
+
+  // Money
+  ctx.fillStyle = '#f0d040';
+  ctx.font = '16px monospace';
+  ctx.textAlign = 'right';
+  ctx.fillText(`所持金: ${game.money}G`, shopX + shopW - 20, shopY + shopH - 15);
+
+  // Controls hint
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#888';
+  ctx.font = '11px monospace';
+  ctx.fillText('↑↓: 選択 | ←→: タブ切替 | SPACE: 決定 | ESC/F: 閉じる', CANVAS_W / 2, shopY + shopH - 15);
+  ctx.textAlign = 'left';
+}
+
+function renderSleeping() {
+  renderPlaying();
+  const alpha = Math.min(1, game.fadeAlpha);
+  ctx.fillStyle = `rgba(0,0,0,${alpha})`;
+  ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+  if (game.fadeAlpha > 0.5) {
+    ctx.fillStyle = `rgba(255,255,255,${(game.fadeAlpha - 0.5) * 2})`;
+    ctx.font = '20px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('💤 おやすみなさい...', CANVAS_W / 2, CANVAS_H / 2);
+    ctx.textAlign = 'left';
+  }
+}
+
+// ============================================================
+// MAIN GAME LOOP
+// ============================================================
+let lastTime = 0;
+
+function gameLoop(timestamp) {
+  const dt = Math.min(0.1, (timestamp - lastTime) / 1000);
+  lastTime = timestamp;
+
+  // Clear all justPressed at the end of each frame
+  // (They're consumed on first read via isJustPressed)
+
+  switch (game.state) {
+    case 'TITLE':
+      renderTitle();
+      updateTitle(dt);
+      break;
+    case 'PLAYING':
+      updatePlaying(dt);
+      renderPlaying();
+      break;
+    case 'SHOP':
+      updateShop(dt);
+      renderShop();
+      break;
+    case 'SLEEPING':
+      updateSleeping(dt);
+      renderSleeping();
+      break;
+  }
+
+  // Clear justPressed
+  for (const key in justPressed) {
+    justPressed[key] = false;
+  }
+
+  requestAnimationFrame(gameLoop);
+}
+
+// Responsive canvas scaling
+function resizeCanvas() {
+  const maxW = window.innerWidth - 20;
+  const maxH = window.innerHeight - 20;
+  const scaleX = maxW / CANVAS_W;
+  const scaleY = maxH / CANVAS_H;
+  const scale = Math.min(scaleX, scaleY, 2);
+  canvas.style.width = Math.floor(CANVAS_W * scale) + 'px';
+  canvas.style.height = Math.floor(CANVAS_H * scale) + 'px';
+}
+window.addEventListener('resize', resizeCanvas);
+resizeCanvas();
+
+// Start
+requestAnimationFrame(gameLoop);
+</script>
+</body>
+</html>
