@@ -212,8 +212,7 @@ function generateMap() {
   for (let y = 11; y <= 14; y++) for (let x = 3; x <= 7; x++) m[y][x] = T.SHOP_WALL;
   for (let x = 3; x <= 7; x++) m[11][x] = T.SHOP_ROOF;
   m[14][5] = T.SHOP_DOOR;
-  for (let y = 10; y <= 14; y++) m[y][5] = T.PATH;
-  m[10][5] = T.PATH;
+  for (let y = 10; y <= 13; y++) m[y][5] = T.PATH;
 
   // Shipping bin
   m[7][7] = T.SHIPPING_BIN;
