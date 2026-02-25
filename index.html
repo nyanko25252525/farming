@@ -914,7 +914,7 @@ function cycleSeed(dir) {
 function updateTime(dt) {
   game.time.timer += dt;
   const minutesPerSecond = (24 * 60) / DAY_LENGTH;
-  if (game.time.timer >= 1 / minutesPerSecond) {
+  if (game.time.timer >= 10 / minutesPerSecond) {
     game.time.timer = 0;
     game.time.minute += 10;
     if (game.time.minute >= 60) {
