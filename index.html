@@ -75,12 +75,23 @@ const CROPS = {
   carrot:  { name: 'ニンジン', season: 2, days: 5, buyPrice: 35, sellPrice: 75, color: '#f08030', leafColor: '#c8a030' },
 };
 
+// Fish definitions
+const FISH = {
+  iwana:      { name: 'イワナ', sellPrice: 50, speed: 1.5, rarity: 0.30, color: '#708090' },
+  ayu:        { name: 'アユ', sellPrice: 80, speed: 2.0, rarity: 0.25, color: '#90c0a0' },
+  koi:        { name: 'コイ', sellPrice: 120, speed: 2.5, rarity: 0.20, color: '#e06040' },
+  nishikigoi: { name: 'ニシキゴイ', sellPrice: 300, speed: 3.0, rarity: 0.10, color: '#f0a030' },
+  unagi:      { name: 'ウナギ', sellPrice: 500, speed: 3.8, rarity: 0.05, color: '#3a3a50' },
+  nagagutsu:  { name: '長靴', sellPrice: 2, speed: 0.8, rarity: 0.10, color: '#604020' },
+};
+
 // Tools
 const TOOLS = [
   { id: 'hoe', name: 'クワ', icon: '⛏', desc: '土を耕す' },
   { id: 'water', name: 'ジョウロ', icon: '💧', desc: '水をやる' },
   { id: 'harvest', name: '収穫', icon: '✋', desc: '作物を収穫する' },
   { id: 'seed', name: 'タネ', icon: '🌱', desc: 'タネを植える' },
+  { id: 'fishing', name: '釣り竿', icon: '🎣', desc: '魚を釣る', requiresRod: true },
 ];
 
 // ============================================================
@@ -136,7 +147,7 @@ function sfxSleep() { playSound(400, 0.3, 'sine', 0.06); setTimeout(() => playSo
 // GAME STATE
 // ============================================================
 const game = {
-  state: 'TITLE',       // TITLE, PLAYING, SHOP, SLEEPING, GAMEOVER
+  state: 'TITLE',       // TITLE, PLAYING, SHOP, SLEEPING, FISHING, GAMEOVER
   player: {
     x: 7 * TILE, y: 8 * TILE,
     dir: 2,              // 0=up, 1=right, 2=down, 3=left
@@ -147,9 +158,11 @@ const game = {
   money: 500,
   selectedTool: 0,
   selectedSeed: 'turnip',
+  hasFishingRod: false,
   inventory: {
     seeds: { turnip: 5, potato: 0, tomato: 0, corn: 0, pumpkin: 0, carrot: 0 },
     harvest: { turnip: 0, potato: 0, tomato: 0, corn: 0, pumpkin: 0, carrot: 0 },
+    fish: { iwana: 0, ayu: 0, koi: 0, nishikigoi: 0, unagi: 0, nagagutsu: 0 },
   },
   crops: {},             // key: "x,y" -> { type, stage, days, watered, maxDays }
   map: [],
@@ -163,6 +176,19 @@ const game = {
   fadeAlpha: 0,
   titleFrame: 0,
   titleCursor: 0,   // 0=続きから / 最初から, 1=最初から / (no save)
+  fishing: {
+    phase: 'cast',       // cast, waiting, bite, catching, result
+    waitTimer: 0,
+    fish: null,
+    barPos: 0.5,         // catch zone position (0-1)
+    barVel: 0,
+    fishPos: 0.5,        // fish position (0-1)
+    fishDir: 1,
+    fishSpeed: 0,
+    progress: 0.5,       // catch progress (0-1)
+    resultTimer: 0,
+    caught: false,
+  }
 };
 
 function hasSaveData() {
@@ -181,9 +207,11 @@ function resetGameState() {
   game.money = 500;
   game.selectedTool = 0;
   game.selectedSeed = 'turnip';
+  game.hasFishingRod = false;
   game.inventory = {
     seeds: { turnip: 5, potato: 0, tomato: 0, corn: 0, pumpkin: 0, carrot: 0 },
     harvest: { turnip: 0, potato: 0, tomato: 0, corn: 0, pumpkin: 0, carrot: 0 },
+    fish: { iwana: 0, ayu: 0, koi: 0, nishikigoi: 0, unagi: 0, nagagutsu: 0 },
   };
   game.crops = {};
   game.particles = [];
@@ -680,10 +708,13 @@ function updatePlaying(dt) {
   if (isJustPressed('Digit2')) { game.selectedTool = 1; sfxSelect(); }
   if (isJustPressed('Digit3')) { game.selectedTool = 2; sfxSelect(); }
   if (isJustPressed('Digit4')) { game.selectedTool = 3; sfxSelect(); }
+  if (isJustPressed('Digit5') && game.hasFishingRod) { game.selectedTool = 4; sfxSelect(); }
 
   // Tab to cycle tools
   if (isJustPressed('Tab')) {
-    game.selectedTool = (game.selectedTool + 1) % TOOLS.length;
+    do {
+      game.selectedTool = (game.selectedTool + 1) % TOOLS.length;
+    } while (TOOLS[game.selectedTool].requiresRod && !game.hasFishingRod);
     sfxSelect();
   }
 
@@ -754,12 +785,29 @@ function updatePlaying(dt) {
   }
 }
 
+function getShopBuyList() {
+  const list = Object.keys(CROPS).map(k => ({ id: k, type: 'seed' }));
+  if (!game.hasFishingRod) {
+    list.push({ id: 'fishingRod', type: 'special' });
+  }
+  return list;
+}
+
+function getShopSellList() {
+  const list = [];
+  for (const k of Object.keys(game.inventory.harvest)) {
+    if (game.inventory.harvest[k] > 0) list.push({ id: k, type: 'crop' });
+  }
+  for (const k of Object.keys(game.inventory.fish)) {
+    if (game.inventory.fish[k] > 0) list.push({ id: k, type: 'fish' });
+  }
+  return list;
+}
+
 function updateShop(dt) {
   game.titleFrame++;
-  const seedKeys = Object.keys(CROPS);
-  const harvestKeys = Object.keys(game.inventory.harvest).filter(k => game.inventory.harvest[k] > 0);
-  const currentList = game.shopTab === 'buy' ? seedKeys : harvestKeys;
-  const maxCursor = currentList.length - 1;
+  const currentList = game.shopTab === 'buy' ? getShopBuyList() : getShopSellList();
+  const maxCursor = Math.max(0, currentList.length - 1);
 
   if (isJustPressed('ArrowUp') || isJustPressed('KeyW')) {
     game.shopCursor = Math.max(0, game.shopCursor - 1); sfxSelect();
@@ -775,25 +823,47 @@ function updateShop(dt) {
 
   if (isJustPressed('Space') || isJustPressed('Enter')) {
     if (game.shopTab === 'buy' && currentList.length > 0) {
-      const cropKey = currentList[game.shopCursor];
-      const crop = CROPS[cropKey];
-      if (game.money >= crop.buyPrice) {
-        game.money -= crop.buyPrice;
-        game.inventory.seeds[cropKey]++;
-        sfxCoin();
-        addMessage(`${crop.name}のタネを購入！ (-${crop.buyPrice}G)`);
-      } else {
-        sfxError();
-        addMessage('お金が足りません！');
+      const item = currentList[game.shopCursor];
+      if (item.type === 'seed') {
+        const crop = CROPS[item.id];
+        if (game.money >= crop.buyPrice) {
+          game.money -= crop.buyPrice;
+          game.inventory.seeds[item.id]++;
+          sfxCoin();
+          addMessage(`${crop.name}のタネを購入！ (-${crop.buyPrice}G)`);
+        } else {
+          sfxError();
+          addMessage('お金が足りません！');
+        }
+      } else if (item.type === 'special' && item.id === 'fishingRod') {
+        if (game.money >= 1000) {
+          game.money -= 1000;
+          game.hasFishingRod = true;
+          sfxCoin();
+          addMessage('釣り竿を購入！ (-1000G)');
+        } else {
+          sfxError();
+          addMessage('お金が足りません！');
+        }
       }
     } else if (game.shopTab === 'sell' && currentList.length > 0) {
-      const cropKey = currentList[game.shopCursor];
-      const crop = CROPS[cropKey];
-      if (game.inventory.harvest[cropKey] > 0) {
-        game.inventory.harvest[cropKey]--;
-        game.money += crop.sellPrice;
-        sfxCoin();
-        addMessage(`${crop.name}を売却！ (+${crop.sellPrice}G)`);
+      const item = currentList[game.shopCursor];
+      if (item.type === 'crop') {
+        const crop = CROPS[item.id];
+        if (game.inventory.harvest[item.id] > 0) {
+          game.inventory.harvest[item.id]--;
+          game.money += crop.sellPrice;
+          sfxCoin();
+          addMessage(`${crop.name}を売却！ (+${crop.sellPrice}G)`);
+        }
+      } else if (item.type === 'fish') {
+        const fish = FISH[item.id];
+        if (game.inventory.fish[item.id] > 0) {
+          game.inventory.fish[item.id]--;
+          game.money += fish.sellPrice;
+          sfxCoin();
+          addMessage(`${fish.name}を売却！ (+${fish.sellPrice}G)`);
+        }
       }
     }
   }
@@ -954,6 +1024,152 @@ function performAction() {
         addMessage('収穫できるものがありません');
       }
       break;
+
+    case 'fishing':
+      if (facing.type === T.WATER) {
+        startFishing();
+      } else {
+        sfxError();
+        addMessage('水辺に向かって使おう');
+      }
+      break;
+  }
+}
+
+function pickRandomFish() {
+  const totalRarity = Object.values(FISH).reduce((sum, f) => sum + f.rarity, 0);
+  let roll = Math.random() * totalRarity;
+  for (const [key, fish] of Object.entries(FISH)) {
+    roll -= fish.rarity;
+    if (roll <= 0) return key;
+  }
+  return 'iwana';
+}
+
+function startFishing() {
+  game.player.energy -= 2;
+  game.state = 'FISHING';
+  const f = game.fishing;
+  f.phase = 'cast';
+  f.waitTimer = 0;
+  f.fish = null;
+  f.barPos = 0.5;
+  f.barVel = 0;
+  f.fishPos = 0.5;
+  f.fishDir = 1;
+  f.fishSpeed = 0;
+  f.progress = 0.4;
+  f.resultTimer = 0;
+  f.caught = false;
+  playSound(300, 0.1, 'sine', 0.05);
+  setTimeout(() => playSound(200, 0.15, 'sine', 0.04), 100);
+}
+
+function updateFishing(dt) {
+  game.titleFrame++;
+  const f = game.fishing;
+
+  if (f.phase === 'cast') {
+    f.waitTimer += dt;
+    if (f.waitTimer > 0.8) {
+      f.phase = 'waiting';
+      f.waitTimer = 0;
+    }
+  } else if (f.phase === 'waiting') {
+    f.waitTimer += dt;
+    const biteTime = 1.5 + Math.random() * 3;
+    if (f.waitTimer > biteTime) {
+      f.phase = 'bite';
+      f.waitTimer = 0;
+      f.fish = pickRandomFish();
+      f.fishSpeed = FISH[f.fish].speed;
+      playSound(800, 0.1, 'square', 0.04);
+    }
+    if (isJustPressed('Escape')) {
+      game.state = 'PLAYING';
+      return;
+    }
+  } else if (f.phase === 'bite') {
+    f.waitTimer += dt;
+    // Player must press Space within 1.2 seconds
+    if (isJustPressed('Space') || isJustPressed('Enter')) {
+      f.phase = 'catching';
+      f.waitTimer = 0;
+      sfxSelect();
+    }
+    if (f.waitTimer > 1.2) {
+      f.phase = 'result';
+      f.caught = false;
+      f.resultTimer = 0;
+      addMessage('遅かった...魚に逃げられた！');
+      sfxError();
+    }
+    if (isJustPressed('Escape')) {
+      game.state = 'PLAYING';
+      return;
+    }
+  } else if (f.phase === 'catching') {
+    // Stardew Valley style: fish bounces, player controls catch bar
+    const catchZoneSize = 0.22;
+
+    // Fish AI movement
+    f.waitTimer += dt;
+    if (f.waitTimer > 0.4 + Math.random() * 0.8) {
+      f.fishDir = Math.random() > 0.5 ? 1 : -1;
+      f.waitTimer = 0;
+    }
+    f.fishPos += f.fishDir * f.fishSpeed * dt * 0.3;
+    f.fishPos = Math.max(0.05, Math.min(0.95, f.fishPos));
+    if (f.fishPos <= 0.05) f.fishDir = 1;
+    if (f.fishPos >= 0.95) f.fishDir = -1;
+
+    // Player catch bar: hold Space to go up, release to fall
+    if (keys['Space'] || keys['Enter']) {
+      f.barVel -= 4.0 * dt;
+    } else {
+      f.barVel += 3.0 * dt;
+    }
+    f.barVel *= 0.92; // damping
+    f.barPos += f.barVel * dt * 2;
+    f.barPos = Math.max(0, Math.min(1 - catchZoneSize, f.barPos));
+    if (f.barPos <= 0) f.barVel = Math.max(0, f.barVel);
+    if (f.barPos >= 1 - catchZoneSize) f.barVel = Math.min(0, f.barVel);
+
+    // Check if fish is inside catch zone
+    const inZone = f.fishPos >= f.barPos && f.fishPos <= f.barPos + catchZoneSize;
+    if (inZone) {
+      f.progress += dt * 0.35;
+    } else {
+      f.progress -= dt * 0.25;
+    }
+    f.progress = Math.max(0, Math.min(1, f.progress));
+
+    // Result
+    if (f.progress >= 1) {
+      f.phase = 'result';
+      f.caught = true;
+      f.resultTimer = 0;
+      game.inventory.fish[f.fish]++;
+      const fishDef = FISH[f.fish];
+      addMessage(`${fishDef.name}を釣り上げた！`);
+      sfxHarvest();
+    } else if (f.progress <= 0) {
+      f.phase = 'result';
+      f.caught = false;
+      f.resultTimer = 0;
+      addMessage('魚に逃げられた...');
+      sfxError();
+    }
+
+    if (isJustPressed('Escape')) {
+      game.state = 'PLAYING';
+      return;
+    }
+  } else if (f.phase === 'result') {
+    f.resultTimer += dt;
+    if (f.resultTimer > 2 || isJustPressed('Space') || isJustPressed('Enter') || isJustPressed('Escape')) {
+      game.state = 'PLAYING';
+    }
   }
 }
 
@@ -1095,6 +1311,7 @@ function saveGame() {
       time: { ...game.time },
       money: game.money,
       selectedSeed: game.selectedSeed,
+      hasFishingRod: game.hasFishingRod,
       inventory: JSON.parse(JSON.stringify(game.inventory)),
       crops: JSON.parse(JSON.stringify(game.crops)),
       weather: game.weather,
@@ -1123,7 +1340,11 @@ function loadGame() {
     game.time = { ...save.time };
     game.money = save.money;
     game.selectedSeed = save.selectedSeed || 'turnip';
+    game.hasFishingRod = save.hasFishingRod || false;
     game.inventory = save.inventory;
+    if (!game.inventory.fish) {
+      game.inventory.fish = { iwana: 0, ayu: 0, koi: 0, nishikigoi: 0, unagi: 0, nagagutsu: 0 };
+    }
     game.crops = save.crops;
     game.weather = save.weather;
     if (save.mapTilled) {
@@ -1374,8 +1595,10 @@ function drawHUD() {
   ctx.fillStyle = 'rgba(0,0,0,0.6)';
   ctx.fillRect(0, toolBarY, CANVAS_W, 44);
 
+  let toolSlot = 0;
   TOOLS.forEach((tool, i) => {
-    const tx = 10 + i * 80;
+    if (tool.requiresRod && !game.hasFishingRod) return;
+    const tx = 10 + toolSlot * 80;
     const ty = toolBarY + 4;
     const selected = i === game.selectedTool;
 
@@ -1400,6 +1623,7 @@ function drawHUD() {
       ctx.font = '9px monospace';
       ctx.fillText(`${seedDef.name}x${game.inventory.seeds[game.selectedSeed]}`, tx + 22, ty + 28);
     }
+    toolSlot++;
   });
 
   // Inventory summary (right side of toolbar)
@@ -1439,6 +1663,8 @@ function drawHUD() {
     drawInteractionHint('F: 寝る (次の日へ)');
   } else if (facing.type === T.SHIPPING_BIN) {
     drawInteractionHint('F: 作物を出荷する');
+  } else if (facing.type === T.WATER && game.hasFishingRod && TOOLS[game.selectedTool].id === 'fishing') {
+    drawInteractionHint('SPACE: 釣りをする');
   }
 }
 
@@ -1491,20 +1717,17 @@ function renderShop() {
   // Items list
   ctx.textAlign = 'left';
   const listY = shopY + 85;
-  const seedKeys = Object.keys(CROPS);
-  const harvestKeys = Object.keys(game.inventory.harvest).filter(k => game.inventory.harvest[k] > 0);
-  const currentList = game.shopTab === 'buy' ? seedKeys : harvestKeys;
+  const currentList = game.shopTab === 'buy' ? getShopBuyList() : getShopSellList();
 
   if (currentList.length === 0 && game.shopTab === 'sell') {
     ctx.fillStyle = '#888';
     ctx.font = '14px monospace';
     ctx.textAlign = 'center';
-    ctx.fillText('売却できる作物がありません', CANVAS_W / 2, listY + 40);
+    ctx.fillText('売却できるものがありません', CANVAS_W / 2, listY + 40);
     ctx.textAlign = 'left';
   }
 
-  currentList.forEach((key, i) => {
-    const crop = CROPS[key];
+  currentList.forEach((item, i) => {
     const itemY = listY + i * 36;
     const selected = i === game.shopCursor;
 
@@ -1516,18 +1739,16 @@ function renderShop() {
       ctx.strokeRect(shopX + 15, itemY, shopW - 30, 32);
     }
 
-    // Crop color swatch
-    ctx.fillStyle = crop.color;
-    ctx.fillRect(shopX + 22, itemY + 6, 20, 20);
-    ctx.strokeStyle = '#000';
-    ctx.lineWidth = 1;
-    ctx.strokeRect(shopX + 22, itemY + 6, 20, 20);
-
-    ctx.fillStyle = '#fff';
-    ctx.font = '13px monospace';
-    ctx.fillText(crop.name, shopX + 50, itemY + 20);
-
-    if (game.shopTab === 'buy') {
+    if (item.type === 'seed') {
+      const crop = CROPS[item.id];
+      ctx.fillStyle = crop.color;
+      ctx.fillRect(shopX + 22, itemY + 6, 20, 20);
+      ctx.strokeStyle = '#000';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(shopX + 22, itemY + 6, 20, 20);
+      ctx.fillStyle = '#fff';
+      ctx.font = '13px monospace';
+      ctx.fillText(crop.name, shopX + 50, itemY + 20);
       const seasonStr = ['春', '夏', '秋', '冬'][crop.season];
       ctx.fillStyle = '#aaa';
       ctx.fillText(`${seasonStr} | ${crop.days}日`, shopX + 150, itemY + 20);
@@ -1535,12 +1756,45 @@ function renderShop() {
       ctx.fillText(`${crop.buyPrice}G`, shopX + 300, itemY + 20);
       ctx.fillStyle = '#aaa';
       ctx.font = '10px monospace';
-      ctx.fillText(`所持: ${game.inventory.seeds[key]}`, shopX + 380, itemY + 20);
-    } else {
+      ctx.fillText(`所持: ${game.inventory.seeds[item.id]}`, shopX + 380, itemY + 20);
+    } else if (item.type === 'special' && item.id === 'fishingRod') {
+      ctx.font = '16px monospace';
+      ctx.fillText('🎣', shopX + 22, itemY + 22);
+      ctx.fillStyle = '#fff';
+      ctx.font = '13px monospace';
+      ctx.fillText('釣り竿', shopX + 50, itemY + 20);
+      ctx.fillStyle = '#aaa';
+      ctx.fillText('池で魚を釣れる', shopX + 150, itemY + 20);
+      ctx.fillStyle = '#f0d040';
+      ctx.fillText('1000G', shopX + 300, itemY + 20);
+    } else if (item.type === 'crop') {
+      const crop = CROPS[item.id];
+      ctx.fillStyle = crop.color;
+      ctx.fillRect(shopX + 22, itemY + 6, 20, 20);
+      ctx.strokeStyle = '#000';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(shopX + 22, itemY + 6, 20, 20);
+      ctx.fillStyle = '#fff';
+      ctx.font = '13px monospace';
+      ctx.fillText(crop.name, shopX + 50, itemY + 20);
       ctx.fillStyle = '#5aad3c';
       ctx.fillText(`${crop.sellPrice}G`, shopX + 200, itemY + 20);
       ctx.fillStyle = '#aaa';
-      ctx.fillText(`x${game.inventory.harvest[key]}`, shopX + 300, itemY + 20);
+      ctx.fillText(`x${game.inventory.harvest[item.id]}`, shopX + 300, itemY + 20);
+    } else if (item.type === 'fish') {
+      const fish = FISH[item.id];
+      ctx.fillStyle = fish.color;
+      ctx.fillRect(shopX + 22, itemY + 6, 20, 20);
+      ctx.strokeStyle = '#000';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(shopX + 22, itemY + 6, 20, 20);
+      ctx.fillStyle = '#fff';
+      ctx.font = '13px monospace';
+      ctx.fillText(fish.name, shopX + 50, itemY + 20);
+      ctx.fillStyle = '#70b0e0';
+      ctx.fillText(`${fish.sellPrice}G`, shopX + 200, itemY + 20);
+      ctx.fillStyle = '#aaa';
+      ctx.fillText(`x${game.inventory.fish[item.id]}`, shopX + 300, itemY + 20);
     }
   });
 
@@ -1556,6 +1810,135 @@ function renderShop() {
   ctx.font = '11px monospace';
   ctx.fillText('↑↓: 選択 | ←→: タブ切替 | SPACE: 決定 | ESC/F: 閉じる', CANVAS_W / 2, shopY + shopH - 15);
   ctx.textAlign = 'left';
+}
+
+function renderFishing() {
+  // Draw the game world behind
+  renderPlaying();
+
+  const f = game.fishing;
+
+  // Dark overlay
+  ctx.fillStyle = 'rgba(0,0,30,0.3)';
+  ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+  if (f.phase === 'cast') {
+    ctx.fillStyle = '#fff';
+    ctx.font = '18px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('🎣 キャスト中...', CANVAS_W / 2, CANVAS_H / 2);
+    ctx.textAlign = 'left';
+  } else if (f.phase === 'waiting') {
+    // Bobber animation
+    const bobY = Math.sin(game.titleFrame * 0.05) * 3;
+    ctx.fillStyle = '#fff';
+    ctx.font = '16px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('...', CANVAS_W / 2, CANVAS_H / 2 + bobY);
+    ctx.fillStyle = '#aaa';
+    ctx.font = '12px monospace';
+    ctx.fillText('当たりを待っています (ESC: やめる)', CANVAS_W / 2, CANVAS_H / 2 + 30);
+    ctx.textAlign = 'left';
+  } else if (f.phase === 'bite') {
+    // Flash "!" alert
+    if (Math.floor(game.titleFrame / 4) % 2 === 0) {
+      ctx.fillStyle = '#f0d040';
+      ctx.font = 'bold 48px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('!', CANVAS_W / 2, CANVAS_H / 2);
+      ctx.fillStyle = '#fff';
+      ctx.font = '14px monospace';
+      ctx.fillText('SPACE で合わせろ！', CANVAS_W / 2, CANVAS_H / 2 + 30);
+      ctx.textAlign = 'left';
+    }
+  } else if (f.phase === 'catching') {
+    // Stardew-style fishing bar
+    const barX = CANVAS_W / 2 + 80;
+    const barH = 260;
+    const barW = 30;
+    const barY = (CANVAS_H - barH) / 2;
+
+    // Outer frame
+    ctx.fillStyle = 'rgba(0,0,0,0.7)';
+    ctx.fillRect(barX - 4, barY - 4, barW + 8, barH + 8);
+    ctx.strokeStyle = '#a08050';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(barX - 4, barY - 4, barW + 8, barH + 8);
+
+    // Bar background (water)
+    const waterGrad = ctx.createLinearGradient(0, barY, 0, barY + barH);
+    waterGrad.addColorStop(0, '#1a3a60');
+    waterGrad.addColorStop(1, '#0a1a30');
+    ctx.fillStyle = waterGrad;
+    ctx.fillRect(barX, barY, barW, barH);
+
+    // Catch zone (green area)
+    const catchZoneSize = 0.22;
+    const zoneY = barY + f.barPos * barH;
+    const zoneH = catchZoneSize * barH;
+    ctx.fillStyle = 'rgba(80,200,80,0.4)';
+    ctx.fillRect(barX, zoneY, barW, zoneH);
+    ctx.strokeStyle = '#50c850';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(barX, zoneY, barW, zoneH);
+
+    // Fish icon
+    const fishY = barY + f.fishPos * barH;
+    const fishDef = FISH[f.fish];
+    ctx.fillStyle = fishDef.color;
+    ctx.beginPath();
+    // Simple fish shape
+    ctx.ellipse(barX + barW / 2, fishY, 10, 6, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.font = '8px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('><>', barX + barW / 2, fishY + 3);
+
+    // Progress bar (left side)
+    const progX = barX - 20;
+    const progW = 10;
+    ctx.fillStyle = '#333';
+    ctx.fillRect(progX, barY, progW, barH);
+    const progH = f.progress * barH;
+    const progColor = f.progress > 0.6 ? '#50c850' : f.progress > 0.3 ? '#e0c030' : '#e03030';
+    ctx.fillStyle = progColor;
+    ctx.fillRect(progX, barY + barH - progH, progW, progH);
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(progX, barY, progW, barH);
+
+    // Fish name & instructions
+    ctx.fillStyle = '#fff';
+    ctx.font = '14px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(`${fishDef.name}が掛かった！`, CANVAS_W / 2 - 40, barY - 10);
+    ctx.fillStyle = '#aaa';
+    ctx.font = '11px monospace';
+    ctx.fillText('SPACE長押しで🟩を上へ | 魚を🟩内に収めろ！', CANVAS_W / 2, barY + barH + 20);
+    ctx.textAlign = 'left';
+  } else if (f.phase === 'result') {
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+    ctx.textAlign = 'center';
+    if (f.caught) {
+      const fishDef = FISH[f.fish];
+      ctx.fillStyle = '#f0d040';
+      ctx.font = 'bold 24px monospace';
+      ctx.fillText(`🎉 ${fishDef.name}を釣り上げた！`, CANVAS_W / 2, CANVAS_H / 2 - 10);
+      ctx.fillStyle = '#aaa';
+      ctx.font = '14px monospace';
+      ctx.fillText(`売値: ${fishDef.sellPrice}G`, CANVAS_W / 2, CANVAS_H / 2 + 20);
+    } else {
+      ctx.fillStyle = '#e06060';
+      ctx.font = 'bold 20px monospace';
+      ctx.fillText('逃げられた...', CANVAS_W / 2, CANVAS_H / 2 - 10);
+    }
+    ctx.fillStyle = '#888';
+    ctx.font = '12px monospace';
+    ctx.fillText('SPACE / ESC で戻る', CANVAS_W / 2, CANVAS_H / 2 + 50);
+    ctx.textAlign = 'left';
+  }
 }
 
 function renderSleeping() {
@@ -1597,6 +1980,10 @@ function gameLoop(timestamp) {
     case 'SHOP':
       updateShop(dt);
       renderShop();
+      break;
+    case 'FISHING':
+      updateFishing(dt);
+      renderFishing();
       break;
     case 'SLEEPING':
       updateSleeping(dt);
