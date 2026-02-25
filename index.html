@@ -162,7 +162,35 @@ const game = {
   shopCursor: 0,
   fadeAlpha: 0,
   titleFrame: 0,
+  titleCursor: 0,   // 0=続きから / 最初から, 1=最初から / (no save)
 };
+
+function hasSaveData() {
+  return !!localStorage.getItem('honobono_farm_save');
+}
+
+function resetGameState() {
+  game.player.x = 7 * TILE;
+  game.player.y = 8 * TILE;
+  game.player.dir = 2;
+  game.player.frame = 0;
+  game.player.frameTimer = 0;
+  game.player.moving = false;
+  game.player.energy = MAX_ENERGY;
+  game.time = { hour: 6, minute: 0, day: 1, season: 0, year: 1, timer: 0 };
+  game.money = 500;
+  game.selectedTool = 0;
+  game.selectedSeed = 'turnip';
+  game.inventory = {
+    seeds: { turnip: 5, potato: 0, tomato: 0, corn: 0, pumpkin: 0, carrot: 0 },
+    harvest: { turnip: 0, potato: 0, tomato: 0, corn: 0, pumpkin: 0, carrot: 0 },
+  };
+  game.crops = {};
+  game.particles = [];
+  game.messages = [];
+  game.weather = 'sunny';
+  game.fadeAlpha = 0;
+}
 
 // ============================================================
 // INPUT
@@ -579,13 +607,31 @@ function drawCrop(screenX, screenY, crop) {
 // ============================================================
 function updateTitle(dt) {
   game.titleFrame++;
+  const hasSave = hasSaveData();
+  const menuCount = hasSave ? 2 : 1; // 「続きから」「最初から」 or 「最初から」のみ
+
+  if (isJustPressed('ArrowUp') || isJustPressed('KeyW')) {
+    game.titleCursor = (game.titleCursor - 1 + menuCount) % menuCount;
+    sfxSelect();
+  }
+  if (isJustPressed('ArrowDown') || isJustPressed('KeyS')) {
+    game.titleCursor = (game.titleCursor + 1) % menuCount;
+    sfxSelect();
+  }
+
   if (isJustPressed('Space') || isJustPressed('Enter')) {
-    game.state = 'PLAYING';
     game.map = generateMap();
     sfxMenuOpen();
 
-    // Load saved game
-    loadGame();
+    if (hasSave && game.titleCursor === 0) {
+      // 続きから
+      loadGame();
+    } else {
+      // 最初から
+      resetGameState();
+      localStorage.removeItem('honobono_farm_save');
+    }
+    game.state = 'PLAYING';
   }
 }
 
@@ -648,6 +694,15 @@ function updatePlaying(dt) {
   // Action (Space)
   if (isJustPressed('Space') || isJustPressed('Enter')) {
     performAction();
+  }
+
+  // Return to title
+  if (isJustPressed('Escape')) {
+    saveGame();
+    game.state = 'TITLE';
+    game.titleCursor = 0;
+    sfxMenuOpen();
+    return;
   }
 
   // Open shop when near shop door
@@ -1160,19 +1215,36 @@ function renderTitle() {
   ctx.fillStyle = '#f0e8c0';
   ctx.fillText('~ Farming Simulation ~', CANVAS_W / 2, 215);
 
-  // Blinking "Press Space"
-  if (Math.floor(game.titleFrame / 30) % 2 === 0) {
-    ctx.fillStyle = '#fff';
-    ctx.font = '16px monospace';
-    ctx.fillText('[ SPACE キーでスタート ]', CANVAS_W / 2, CANVAS_H - 60);
+  // Menu
+  const hasSave = hasSaveData();
+  const menuItems = hasSave ? ['続きから', '最初から'] : ['最初から'];
+  const menuBaseY = CANVAS_H - 120;
+
+  for (let i = 0; i < menuItems.length; i++) {
+    const itemY = menuBaseY + i * 36;
+    const selected = i === game.titleCursor;
+
+    // Background
+    ctx.fillStyle = selected ? 'rgba(90,60,30,0.85)' : 'rgba(0,0,0,0.4)';
+    ctx.fillRect(CANVAS_W / 2 - 110, itemY - 14, 220, 30);
+    if (selected) {
+      ctx.strokeStyle = '#f0d040';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(CANVAS_W / 2 - 110, itemY - 14, 220, 30);
+    }
+
+    // Text
+    ctx.fillStyle = selected ? '#f0d040' : '#ccc';
+    ctx.font = selected ? 'bold 16px monospace' : '16px monospace';
+    ctx.fillText(menuItems[i], CANVAS_W / 2, itemY + 6);
   }
 
   // Controls info
   ctx.fillStyle = 'rgba(0,0,0,0.5)';
-  ctx.fillRect(CANVAS_W / 2 - 200, CANVAS_H - 45, 400, 38);
+  ctx.fillRect(CANVAS_W / 2 - 200, CANVAS_H - 40, 400, 32);
   ctx.fillStyle = '#ddd';
   ctx.font = '11px monospace';
-  ctx.fillText('WASD/矢印:移動 | SPACE:アクション | F:施設 | 1-4:道具 | Q/E:タネ切替', CANVAS_W / 2, CANVAS_H - 22);
+  ctx.fillText('↑↓: 選択 | SPACE/Enter: 決定', CANVAS_W / 2, CANVAS_H - 20);
 
   ctx.textAlign = 'left';
 }
@@ -1291,6 +1363,11 @@ function drawHUD() {
   ctx.fillStyle = '#fff';
   ctx.font = '10px monospace';
   ctx.fillText(`体力`, energyX + energyW + 4, energyY + 9);
+
+  // ESC hint
+  ctx.fillStyle = '#999';
+  ctx.font = '9px monospace';
+  ctx.fillText('ESC: タイトルへ', CANVAS_W - 90, 30);
 
   // Tool bar
   const toolBarY = CANVAS_H - 44;
